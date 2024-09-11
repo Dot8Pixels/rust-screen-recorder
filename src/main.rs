@@ -1,8 +1,12 @@
+use chrono::Local;
+use std::collections::HashMap;
+use std::env;
+use std::fs;
+use std::io::{self, Write};
 use std::{
-    io::{self, Write},
+    path::{Path, PathBuf},
     time::Instant,
 };
-
 use windows_capture::{
     capture::GraphicsCaptureApiHandler,
     encoder::{AudioSettingsBuilder, ContainerSettingsBuilder, VideoEncoder, VideoSettingsBuilder},
@@ -12,30 +16,65 @@ use windows_capture::{
     settings::{ColorFormat, CursorCaptureSettings, DrawBorderSettings, Settings},
 };
 
-// This struct will be used to handle the capture events.
+#[derive(Debug)]
+enum Value {
+    PathBuf(PathBuf),
+    Monitor(Monitor),
+}
+
 struct Capture {
-    // The video encoder that will be used to encode the frames.
     encoder: Option<VideoEncoder>,
-    // To measure the time the capture has been running
     start: Instant,
 }
 
 impl GraphicsCaptureApiHandler for Capture {
-    // The type of flags used to get the values from the settings.
-    type Flags = String;
+    type Flags = HashMap<String, Value>;
 
-    // The type of error that can occur during capture, the error will be returned from `CaptureControl` and `start` functions.
     type Error = Box<dyn std::error::Error + Send + Sync>;
 
-    // Function that will be called to create the struct. The flags can be passed from settings.
-    fn new(message: Self::Flags) -> Result<Self, Self::Error> {
-        println!("Got The Flag: {message}");
+    fn new(user_settings: Self::Flags) -> Result<Self, Self::Error> {
+        let output_path = if let Some(output_path) = user_settings.get("output_path") {
+            match output_path {
+                Value::PathBuf(path) => Some(path),
+                _ => {
+                    println!("Key exists, but it's not a PathBuf");
+                    None
+                }
+            }
+        } else {
+            println!("Key 'output_path' not found");
+            None
+        };
+
+        if let Some(output_path) = output_path {
+            println!("The path is: {:?}", output_path);
+        }
+
+        let monitor = if let Some(monitor) = user_settings.get("monitor") {
+            match monitor {
+                Value::Monitor(monitor) => Some(monitor),
+                _ => {
+                    println!("Key exists, but it's not a Monitor");
+                    None
+                }
+            }
+        } else {
+            println!("Key 'output_path' not found");
+            None
+        };
+
+        if let Some(monitor) = monitor {
+            println!("The monitor is: {:?}", monitor);
+        }
 
         let encoder = VideoEncoder::new(
-            VideoSettingsBuilder::new(1920, 1080),
+            VideoSettingsBuilder::new(
+                monitor.unwrap().width().unwrap(),
+                monitor.unwrap().height().unwrap(),
+            ),
             AudioSettingsBuilder::default().disabled(true),
             ContainerSettingsBuilder::default(),
-            "video.mp4",
+            output_path.unwrap(),
         )?;
 
         Ok(Self {
@@ -44,7 +83,6 @@ impl GraphicsCaptureApiHandler for Capture {
         })
     }
 
-    // Called every time a new frame is available.
     fn on_frame_arrived(
         &mut self,
         frame: &mut Frame,
@@ -56,29 +94,22 @@ impl GraphicsCaptureApiHandler for Capture {
         );
         io::stdout().flush()?;
 
-        // Send the frame to the video encoder
         self.encoder.as_mut().unwrap().send_frame(frame)?;
 
-        // Note: The frame has other uses too for example you can save a single for to a file like this:
-        // frame.save_as_image("frame.png", ImageFormat::Png)?;
-        // Or get the raw data like this so you have full control:
-        // let data = frame.buffer()?;
+        let project_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let trigger_path = project_root.join("trigger.txt");
+        let trigger =
+            fs::read_to_string(trigger_path).expect("Should have been able to read the file");
 
-        // Stop the capture after 6 seconds
-        if self.start.elapsed().as_secs() >= 6 {
-            // Finish the encoder and save the video.
+        if trigger == *"1" {
             self.encoder.take().unwrap().finish()?;
-
             capture_control.stop();
-
-            // Because there wasn't any new lines in previous prints
             println!();
         }
 
         Ok(())
     }
 
-    // Optional handler called when the capture item (usually a window) closes.
     fn on_closed(&mut self) -> Result<(), Self::Error> {
         println!("Capture Session Closed");
 
@@ -86,24 +117,36 @@ impl GraphicsCaptureApiHandler for Capture {
     }
 }
 
+fn open_text_file(file_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    open::that(file_path)?; // This opens the file in the system's default application
+    Ok(())
+}
 fn main() {
-    // Gets The Foreground Window, Checkout The Docs For Other Capture Items
     let primary_monitor = Monitor::primary().expect("There is no primary monitor");
 
+    let project_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let datetime = Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
+    let record_name = format!("screen_recording_{}.mp4", datetime);
+    let captures_path = project_root.join("Captures").join(record_name);
+
+    let trigger_path = project_root.join("trigger.txt");
+    fs::write(trigger_path.clone(), "0").unwrap();
+    match open_text_file(trigger_path) {
+        Ok(_) => println!("Text file opened successfully."),
+        Err(e) => eprintln!("Failed to open text file: {}", e),
+    }
+
+    let mut user_settings: HashMap<String, Value> = HashMap::new();
+    user_settings.insert(String::from("output_path"), Value::PathBuf(captures_path));
+    user_settings.insert(String::from("monitor"), Value::Monitor(primary_monitor));
+
     let settings = Settings::new(
-        // Item To Captue
         primary_monitor,
-        // Capture Cursor Settings
-        CursorCaptureSettings::Default,
-        // Draw Borders Settings
+        CursorCaptureSettings::WithoutCursor,
         DrawBorderSettings::Default,
-        // The desired color format for the captured frame.
         ColorFormat::Rgba8,
-        // Additional flags for the capture settings that will be passed to user defined `new` function.
-        "Yea This Works".to_string(),
+        user_settings,
     );
 
-    // Starts the capture and takes control of the current thread.
-    // The errors from handler trait will end up here
     Capture::start(settings).expect("Screen Capture Failed");
 }
