@@ -1,11 +1,13 @@
 use chrono::Local;
-use std::collections::HashMap;
-use std::env;
-use std::io;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use crossterm::terminal;
+use std::{
+    collections::HashMap,
+    env,
+    io::{stdin, Read},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    thread,
+};
 use windows_capture::{
     capture::GraphicsCaptureApiHandler,
     encoder::{AudioSettingsBuilder, ContainerSettingsBuilder, VideoEncoder, VideoSettingsBuilder},
@@ -25,15 +27,6 @@ enum Value {
 struct Capture {
     encoder: Option<VideoEncoder>,
     flag: Arc<Mutex<bool>>,
-}
-
-fn get_keyboard_input() -> String {
-    io::stdout().flush().expect("Failed to flush stdout.");
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .expect("Failed to read line");
-    input.trim().to_string()
 }
 
 impl GraphicsCaptureApiHandler for Capture {
@@ -115,17 +108,21 @@ fn main() {
     let shared_flag = Arc::new(Mutex::new(false));
     let shared_flag_clone = Arc::clone(&shared_flag);
 
-    println!("Initialize recorder...");
-    println!("Parse '1' to stop recorder");
-    let handle = thread::spawn(move || loop {
-        let input = get_keyboard_input();
-        let mut flag = shared_flag_clone.lock().unwrap();
-
-        if input.trim() == "1" {
-            *flag = true;
-            break;
-        } else {
-            println!("Invalid stop command, please parse '1' to stop");
+    println!("Start recording...");
+    println!("Press 'q' to stop recorder");
+    let handle = thread::spawn(move || {
+        terminal::enable_raw_mode().expect("Could not turn on Raw mode");
+        loop {
+            let mut buf = [0; 1];
+            if stdin().read(&mut buf).expect("Failed to read line") == 1 {
+                let character = buf[0];
+                if character == b'q' {
+                    let mut flag = shared_flag_clone.lock().unwrap();
+                    *flag = true;
+                    terminal::disable_raw_mode().expect("Could not disable raw mode");
+                    break;
+                }
+            }
         }
     });
 
